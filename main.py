@@ -2,6 +2,9 @@ import logging
 from Utils import main
 from flask import Flask, request, jsonify
 import os
+import shutil
+import zipfile
+import uuid
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +50,64 @@ def upload():
 
         return jsonify(
             message="File Transcribed successfully", Transcription=x, location=y
+        )
+
+    except Exception as e:
+        # Log any exceptions that occur during the upload process
+        logging.error("An error occurred during file upload: %s", e, exc_info=True)
+        return jsonify(error="An error occurred during file upload"), 500
+
+
+@app.route("/upload_zip", methods=["POST"])
+def upload_zip():
+    try:
+        # Check if there are any files in the request
+        if "audio_zip" not in request.files:
+            logging.error("No zip file provided in the request")
+            return jsonify(error="No zip file provided"), 400
+
+        audio_zip = request.files["audio_zip"]
+        if audio_zip.filename == "":
+            logging.error("No selected file")
+            return jsonify(error="No selected file"), 400
+
+        # Create a temporary directory to extract audio files
+        temp_directory = "temp"
+        if not os.path.exists(temp_directory):
+            os.makedirs(temp_directory)
+
+        # Generate a unique directory name
+        unique_directory = str(uuid.uuid4())
+        extract_directory = os.path.join(temp_directory, unique_directory)
+        os.makedirs(extract_directory)
+
+        # Save the zip file to the temporary directory
+        zip_path = os.path.join(extract_directory, audio_zip.filename)
+        audio_zip.save(zip_path)
+
+        # Extract audio files from the zip archive
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(extract_directory)
+
+        # Call the main function for each extracted audio file
+        transcriptions = {}
+        for filename in os.listdir(extract_directory):
+            if filename.endswith(".mp3"):  # Adjust file extension as needed
+                audio_file_path = os.path.join(extract_directory, filename)
+                transcription, location = main(audio_file_path)
+                transcriptions[filename] = {
+                    "transcription": transcription,
+                    "location": location,
+                }
+
+        # Clean up temporary directory
+        shutil.rmtree(extract_directory)
+
+        # Log successful transcription
+        logging.info("All files transcribed successfully")
+
+        return jsonify(
+            message="All files transcribed successfully", transcriptions=transcriptions
         )
 
     except Exception as e:
