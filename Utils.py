@@ -23,6 +23,12 @@ import nltk
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 from whisperx.utils import LANGUAGES, TO_LANGUAGE_CODE
 
+import os
+import logging
+import torch
+import re
+from pydub import AudioSegment
+
 
 punct_model_langs = [
     "en",
@@ -485,6 +491,13 @@ def transcribe_batched(
 
 def main(path):
     ############################################################################################################################
+    # Set up logging
+    logging.basicConfig(
+        filename="Utils.log",
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    ############################################################################################################################
     audio_path = path
     enable_stemming = True
     whisper_model_name = "medium.en"
@@ -510,11 +523,10 @@ def main(path):
     else:
         vocal_target = audio_path
     ############################################################################################################################
+    logging.info(f"Vocal target: {vocal_target}")
 
     if torch.cuda.is_available():
         compute_type = "float16"
-    # compute_type = "int8_float16"  # or run on GPU with INT8
-
     else:
         compute_type = "int8"
 
@@ -537,6 +549,8 @@ def main(path):
             suppress_numerals,
             device,
         )
+
+    logging.info(f"Language: {language}")
     if language in wav2vec2_langs:
         if torch.cuda.is_available():
             device = "cuda"
@@ -556,9 +570,7 @@ def main(path):
         del alignment_model
         torch.cuda.empty_cache()
     else:
-        assert (
-            batch_size == 0
-        ), (  # TODO: add a better check for word timestamps existence
+        assert batch_size == 0, (
             f"Unsupported language: {language}, use --batch_size to 0"
             " to generate word timestamps using whisper directly and fix this error."
         )
@@ -635,3 +647,157 @@ def main(path):
     cleanup(temp_path)
     txt_path = f"{os.path.splitext(audio_path)[0]}.txt"
     return ssm, txt_path
+
+
+# def main(path):
+#     ############################################################################################################################
+#     audio_path = path
+#     enable_stemming = True
+#     whisper_model_name = "medium.en"
+#     suppress_numerals = True
+#     batch_size = 8
+#     language = None
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
+#     ############################################################################################################################
+#     if enable_stemming:
+#         return_code = os.system(
+#             f'python3 -m demucs.separate -n htdemucs --two-stems=vocals "{audio_path}" -o "temp_outputs"'
+#         )
+#         if return_code != 0:
+#             logging.warning("Source splitting failed, using original audio file.")
+#             vocal_target = audio_path
+#         else:
+#             vocal_target = os.path.join(
+#                 "temp_outputs",
+#                 "htdemucs",
+#                 os.path.splitext(os.path.basename(audio_path))[0],
+#                 "vocals.wav",
+#             )
+#     else:
+#         vocal_target = audio_path
+#     ############################################################################################################################
+
+#     if torch.cuda.is_available():
+#         compute_type = "float16"
+#     # compute_type = "int8_float16"  # or run on GPU with INT8
+
+#     else:
+#         compute_type = "int8"
+
+#     if batch_size != 0:
+#         whisper_results, language = transcribe_batched(
+#             vocal_target,
+#             language,
+#             batch_size,
+#             whisper_model_name,
+#             compute_type,
+#             suppress_numerals,
+#             device,
+#         )
+#     else:
+#         whisper_results, language = transcribe(
+#             vocal_target,
+#             language,
+#             whisper_model_name,
+#             compute_type,
+#             suppress_numerals,
+#             device,
+#         )
+#     if language in wav2vec2_langs:
+#         if torch.cuda.is_available():
+#             device = "cuda"
+#         else:
+#             device = "cpu"
+#         alignment_model, metadata = whisperx.load_align_model(
+#             language_code=language, device=device
+#         )
+#         result_aligned = whisperx.align(
+#             whisper_results, alignment_model, metadata, vocal_target, device
+#         )
+#         word_timestamps = filter_missing_timestamps(
+#             result_aligned["word_segments"],
+#             initial_timestamp=whisper_results[0].get("start"),
+#             final_timestamp=whisper_results[-1].get("end"),
+#         )
+#         del alignment_model
+#         torch.cuda.empty_cache()
+#     else:
+#         assert (
+#             batch_size == 0
+#         ), (  # TODO: add a better check for word timestamps existence
+#             f"Unsupported language: {language}, use --batch_size to 0"
+#             " to generate word timestamps using whisper directly and fix this error."
+#         )
+#         word_timestamps = []
+#         for segment in whisper_results:
+#             for word in segment["words"]:
+#                 word_timestamps.append(
+#                     {"word": word[2], "start": word[0], "end": word[1]}
+#                 )
+
+#     sound = AudioSegment.from_file(vocal_target).set_channels(1)
+#     ROOT = os.getcwd()
+#     temp_path = os.path.join(ROOT, "temp_outputs")
+#     os.makedirs(temp_path, exist_ok=True)
+#     sound.export(os.path.join(temp_path, "mono_file.wav"), format="wav")
+#     ############################################################################################################################
+
+#     if torch.cuda.is_available():
+#         msdd_model = NeuralDiarizer(cfg=create_config(temp_path)).to("cuda")
+#         msdd_model.diarize()
+#         del msdd_model
+#         torch.cuda.empty_cache()
+#     else:
+#         msdd_model = NeuralDiarizer(cfg=create_config(temp_path)).to("cpu")
+#         msdd_model.diarize()
+#         del msdd_model
+#         torch.cuda.empty_cache()
+#     ###################################################################################################
+#     # Reading timestamps <> Speaker Labels mapping
+#     speaker_ts = []
+#     with open(os.path.join(temp_path, "pred_rttms", "mono_file.rttm"), "r") as f:
+#         lines = f.readlines()
+#         for line in lines:
+#             line_list = line.split(" ")
+#             s = int(float(line_list[5]) * 1000)
+#             e = s + int(float(line_list[8]) * 1000)
+#             speaker_ts.append([s, e, int(line_list[11].split("_")[-1])])
+#     wsm = get_words_speaker_mapping(word_timestamps, speaker_ts, "start")
+#     if language in punct_model_langs:
+#         punct_model = PunctuationModel(model="kredor/punctuate-all")
+#         words_list = list(map(lambda x: x["word"], wsm))
+#         labled_words = punct_model.predict(words_list)
+#         ending_puncts = ".?!"
+#         model_puncts = ".,;:!?"
+#         # We don't want to punctuate U.S.A. with a period. Right?
+#         is_acronym = lambda x: re.fullmatch(r"\b(?:[a-zA-Z]\.){2,}", x)
+#         for word_dict, labeled_tuple in zip(wsm, labled_words):
+#             word = word_dict["word"]
+#             if (
+#                 word
+#                 and labeled_tuple[1] in ending_puncts
+#                 and (word[-1] not in model_puncts or is_acronym(word))
+#             ):
+#                 word += labeled_tuple[1]
+#                 if word.endswith(".."):
+#                     word = word.rstrip(".")
+#                 word_dict["word"] = word
+#     else:
+#         logging.warning(
+#             f"Punctuation restoration is not available for {language} language. Using the original punctuation."
+#         )
+#     wsm = get_realigned_ws_mapping_with_punctuation(wsm)
+#     ssm = get_sentences_speaker_mapping(wsm, speaker_ts)
+
+#     ################################################################################################################################
+#     with open(f"{os.path.splitext(audio_path)[0]}.txt", "w", encoding="utf-8-sig") as f:
+#         get_speaker_aware_transcript(ssm, f)
+
+#     with open(
+#         f"{os.path.splitext(audio_path)[0]}.srt", "w", encoding="utf-8-sig"
+#     ) as srt:
+#         write_srt(ssm, srt)
+
+#     cleanup(temp_path)
+#     txt_path = f"{os.path.splitext(audio_path)[0]}.txt"
+#     return ssm, txt_path
